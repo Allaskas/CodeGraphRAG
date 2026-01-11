@@ -76,6 +76,27 @@ def find_node_by_entity_and_location(graph_data: Dict, entity: str, location_str
     return None
 
 
+def find_node_by_entity_location_and_file(graph_data: Dict, entity: str, location: Dict, file_path: str) -> Dict | None:
+    for node in graph_data.get("nodes", []):
+        props = node.get("properties", {})
+
+        if props.get("qualifiedName") != entity:
+            continue
+        if props.get("File") != file_path:
+            continue
+
+        node_loc = props.get("location", {})
+        if (
+            node_loc.get("startLine") == location.get("startLine")
+            and node_loc.get("endLine") == location.get("endLine")
+            and node_loc.get("startColumn") == location.get("startColumn")
+            and node_loc.get("endColumn") == location.get("endColumn")
+        ):
+            return node
+
+    return None
+
+
 def find_related_files_by_relationships(graph_data: Dict, node_ids: Set[int]) -> Set[str]:
     """
     根据节点ID集合，遍历 relationships 找相关节点的文件路径。

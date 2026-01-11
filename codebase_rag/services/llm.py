@@ -1,3 +1,4 @@
+import asyncio
 from typing import cast, Any
 
 from loguru import logger
@@ -433,7 +434,17 @@ def create_code2text_model() -> Any:
         raise LLMGenerationError(f"Failed to initialize RAG Orchestrator: {e}") from e
 
 
-if __name__ == "__main__":
-    model = create_repair_code_model("hello")
-    result = model.run_sync("hello")
-    print(result)
+def run_stream_sync(model, prompt: str) -> str:
+    final_text = ""
+
+    async def _run():
+        nonlocal final_text
+        async with model.run_stream(prompt) as streamed:
+            async for text in streamed.stream_text():
+                final_text = text  # ⭐ 覆盖，而不是 append
+
+    asyncio.run(_run())
+    return final_text
+
+
+

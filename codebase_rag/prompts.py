@@ -587,6 +587,14 @@ and can lead to technical debt, maintainability issues, and performance problems
 
 ## Anti-Pattern Definition
 {definition}
+You must output STRICTLY valid JSON.
+
+Rules:
+- Output JSON only. No explanations, no markdown.
+- All strings MUST escape newlines as \\n
+- Do NOT include raw newlines inside JSON strings
+- Do NOT include tabs or control characters
+- Do NOT wrap output in ``` blocks
 
 """.strip()
 
@@ -859,13 +867,137 @@ def build_generate_file_repair_suggestions_prompt(classify_result, antipattern_j
     6. Each operation must be described step by step, with reasoning and potential impact on other classes in the hierarchy.
     """.strip()
 
-    # ===== 根据 antipattern_type 组合 Prompt =====
-    full_prompt = ""
-    if antipattern_type == "ch":
-        full_prompt = f"""
+    # ===== AWD 反模式专用增强 Prompt =====
+    awd_prompt = """
+    **Additional Requirements for Abstraction Without Decoupling (AWD) Anti-pattern:**
+
+    1. You must analyze whether the root cause of the anti-pattern lies primarily in:
+       - the clientClass design,
+       - the superType design,
+       - the subType design,
+       - or any combination of the above.
+
+    2. Add a new field at the same level as "summary" named **"modification_scope"** with the following format:
+    {
+      "modification_scope": ["clientClass"] | ["superType"] | ["subType"]
+                           | ["clientClass", "superType"] | ["clientClass", "subType"]
+                           | ["superType", "subType"] | ["clientClass", "superType", "subType"]
+    }
+
+    3. The value of "modification_scope" must strictly reflect where the actual code modifications are applied.
+       - If you only change call sites and orchestration logic in clientClass, you must NOT include "superType" or "subType".
+       - If you introduce/modify APIs in superType/subType (e.g., new method, signature change, factory relocation), you must include them.
+
+    4. You must explicitly use the AWD evidence in the anti-pattern JSON to ground your repair plan:
+       - Use "clientClass", "superType", "subType" to define the problematic dependency direction.
+       - Use "details.clientClass2superType.snippets[*]" and "details.clientClass2subType.snippets[*]" to pinpoint:
+         - the exact call sites ("invocation.code" + "invocation.location"),
+         - the callee methods ("childMethod.entity"),
+         - and the caller methods ("parentMethod.entity").
+       Your repair operations must reference and resolve these relations, not generic statements.
+
+    5. In the repair suggestions, you must clearly explain:
+       - why clientClass should or should not directly depend on subType creation/builders,
+       - whether clientClass should depend on superType only, subType only, or a newly introduced abstraction,
+       - how responsibilities (context construction, builder usage, resource acquisition) are reassigned across the involved types/files.
+
+    6. For each file involved, the "repair_description" must include **explicit and executable operations**, such as:
+       - replacing specific invocation(s) shown in "invocation.code" with a new API usage (old call → new call),
+       - introducing a new method in superType to hide subType-specific creation (e.g., move builder/factory behind superType),
+       - moving a builder/factory method from subType into superType or a dedicated provider/factory class,
+       - changing method signatures to accept an abstraction (interface/provider) instead of a concrete type,
+       - deleting or deprecating APIs that force architecture-wide coupling,
+       - renaming methods/classes (old name → new name) to reflect corrected boundaries.
+
+    7. Your summary MUST clearly and explicitly list all dependency-impacting changes, including:
+       - deleted methods/classes,
+       - renamed methods/classes (old name → new name),
+       - method signature changes,
+       - moved methods across files or class hierarchies (from → to),
+       - newly introduced or removed abstract methods/interfaces/providers,
+       - and the required updates for callers affected by the changes.
+
+    8. You must output ONE coherent repair plan and commit to it.
+       Do NOT output multiple alternative plans.
+    """.strip()
+
+    # ===== MH 反模式专用增强 Prompt =====
+    mh_prompt = """
+    **Additional Requirements for Multiple Hierarchy (MH) Anti-pattern:**
+
+    Context:
+    - MH here means Multiple Hierarchy dependency**.
+    - The anti-pattern JSON provides:
+      - "start": the subtype endpoint of the multiple ("start.object", "start.file", "start.modifier", "start.location")
+      - "end": the supertype endpoint of the multiple ("end.object", "end.file", "end.modifier", "end.location")
+      - "multipath": one or more paths showing how "start" reaches "end" through intermediate types.
+    - Each path in "multipath" is a list of edges (relationType = "Inherit" / "Implement") with from/to entity, file, modifier, location.
+
+    1. You must analyze whether the root cause of the Multiple Hierarchy lies primarily in:
+       - the subtype ("start.object") design,
+       - the supertype ("end.object") design,
+       - or the intermediate types in the path(s) from start to end,
+       - or any combination of the above.
+
+    2. Add a new field at the same level as "summary" named **"modification_scope"** with the following format:
+    {
+      "modification_scope": ["subtype"] | ["supertype"] | ["intermediate"]
+                           | ["subtype", "supertype"] | ["subtype", "intermediate"]
+                           | ["supertype", "intermediate"] | ["subtype", "supertype", "intermediate"]
+    }
+
+    3. The value of "modification_scope" must strictly reflect where the actual code modifications are applied:
+       - "subtype": modifications applied in the subtype endpoint file ("start.file") and/or its declaration (extends/implements list).
+       - "supertype": modifications applied in the supertype endpoint file ("end.file") and/or its declaration (extends/implements list).
+       - "intermediate": modifications applied to any types/files that appear on any path in "multipath" excluding the endpoints
+         (i.e., the set of intermediate files/types from start to end).
+
+    4. You must explicitly ground your analysis in the provided Multiple paths:
+       - Enumerate each path in "multipath" as an ordered chain:
+         start.object -> ... (intermediate types) ... -> end.object
+       - Identify the exact edge(s) (relationType + fromEntity + toEntity) that create/complete the multiple.
+
+    5. In the repair suggestions, you must clearly explain:
+       - why the multiple exists (which dependency direction is conceptually wrong),
+       - how the multiple will be broken (which extends/implements edge is removed or redirected),
+       - how responsibilities/behaviors are reassigned so that type contracts remain consistent after breaking the multiple.
+
+    6. For each file involved, the "repair_description" must include **explicit and executable operations**, such as:
+       - removing or replacing a specific "extends" / "implements" relationship (old → new),
+       - introducing a new abstraction (interface/abstract class) to decouple subtype and supertype if they mutually depend,
+       - moving shared method contracts to a new interface to avoid upward/downward Multiple dependency,
+       - introducing template methods or hooks to invert dependency direction safely,
+       - changing method signatures to depend on an abstraction rather than a concrete subtype/supertype,
+       - deleting redundant inheritance links that participate in the multiple.
+
+    7. Your summary MUST clearly and explicitly list all dependency-impacting changes, including:
+       - removed/added inheritance or implementation links (old link → new link),
+       - renamed interfaces/classes (old name → new name),
+       - method signature changes,
+       - moved methods across files or hierarchies (from → to),
+       - newly introduced or removed abstract methods/interfaces,
+       - and which intermediate files (from the start→end paths) may require adaptation.
+
+    8. You must output ONE coherent repair plan and commit to it.
+       Do NOT output multiple alternative plans.
+    """.strip()
+
+    specific_prompt = ""
+    t = antipattern_type.lower()
+
+    if t == "ch":
+        specific_prompt = ch_prompt
+        print(f"antipattern_type: {t}")
+    elif t == "awd":
+        specific_prompt = awd_prompt
+        print(f"antipattern_type: {t}")
+    elif t == "mh":
+        specific_prompt = mh_prompt
+        print(f"antipattern_type: {t}")
+    full_prompt = f"""
     {base_prompt}
-    
-    {ch_prompt}
+
+    {specific_prompt}
     
     ---
     Anti-pattern details (JSON format):
@@ -874,6 +1006,15 @@ def build_generate_file_repair_suggestions_prompt(classify_result, antipattern_j
     Directly related files:
     {json.dumps(direct_files, indent=2, ensure_ascii=False)}
     Please begin generating the detailed repair suggestions based on the above information.
+    You must output STRICTLY valid JSON.
+
+Rules:
+- Output JSON only. No explanations, no markdown.
+- All strings MUST escape newlines as \\n
+- Do NOT include raw newlines inside JSON strings
+- Do NOT include tabs or control characters
+- Do NOT wrap output in ``` blocks
+
     """.strip()
 
     return full_prompt
@@ -967,6 +1108,12 @@ Decision rules (important):
 
 - Set "should_update" to true **only if** the summary describes changes that directly affect code elements used in this file.
 - If there is no concrete dependency impact, set "should_update" to false.
+
+- Output JSON only. No explanations, no markdown.
+- All strings MUST escape newlines as \\n
+- Do NOT include raw newlines inside JSON strings
+- Do NOT include tabs or control characters
+- Do NOT wrap output in ``` blocks
 """
     return prompt.strip()
 
@@ -1086,5 +1233,12 @@ def build_indirect_dependency_change_prompt_1(summary: str, file_content: str, a
 
     - Set "should_update" to true **only if** the summary describes changes that directly affect code elements used in this file.
     - If there is no concrete dependency impact, set "should_update" to false.
+    You must output STRICTLY valid JSON.
+
+- Output JSON only. No explanations, no markdown.
+- All strings MUST escape newlines as \\n
+- Do NOT include raw newlines inside JSON strings
+- Do NOT include tabs or control characters
+- Do NOT wrap output in ``` blocks
     """
     return prompt.strip()

@@ -1,21 +1,24 @@
 import json
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 
 from loguru import logger
 from tqdm import tqdm
 
 from codebase_rag.prompts import build_antipattern_relevance_user_input_func
-from codebase_rag.services.llm import create_relevance_model
+from codebase_rag.services.llm import create_relevance_model, run_stream_sync
 
 
 def run_with_retry(client, user_prompt, max_retries=3):
     attempt = 0
     while attempt <= max_retries:
         try:
-            result = client.run_sync(user_prompt)
-            print(f"result: {result}")
-            desc = getattr(result, "output", str(result)).strip()  # LLM 原始返回
+            result = run_stream_sync(client, user_prompt)
+            # dump_llm_debug(user_prompt, result)
+            desc = result.strip()
+            desc = sanitize_json_text(desc)
             llm_json = json.loads(desc)  # 解析 JSON
             return llm_json
         except Exception as e:
@@ -26,14 +29,47 @@ def run_with_retry(client, user_prompt, max_retries=3):
                 logger.warning(f"LLM 调用失败（第 {attempt} 次重试），错误：{e}")
 
 
+def dump_llm_debug(prompt: str, result: str, prefix: str = "llm_debug"):
+    """
+    将 prompt 和 LLM 原始输出保存到当前目录的 txt 文件中
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{prefix}_{ts}.txt"
+    path = Path.cwd() / filename
+
+    content = (
+        "===== USER PROMPT =====\n"
+        f"{prompt}\n\n"
+        "===== LLM RAW RESULT =====\n"
+        f"{result}\n"
+    )
+
+    path.write_text(content, encoding="utf-8")
+
+    return str(path)
+
+
+def sanitize_json_text(text: str) -> str:
+    """
+    清理 JSON 中的非法控制字符
+    """
+    # 去掉 ASCII 控制字符（保留 \n \t \r 的转义形式）
+    text = re.sub(
+        r'[\x00-\x08\x0b\x0c\x0e-\x1f]',
+        '',
+        text
+    )
+    return text
+
+
 def run_with_retry_code(client, user_prompt, max_retries=3):
     attempt = 0
     while attempt <= max_retries:
         try:
-            result = client.run_sync(user_prompt)
+            result = run_stream_sync(client, user_prompt)
             print(result)
             # LLM 返回的内容（通常是字符串），去除多余空白
-            desc = getattr(result, "output", str(result)).strip()
+            desc = result.strip()
             # 直接返回字符串，不解析JSON
             return desc
         except Exception as e:

@@ -1,4 +1,9 @@
 import json
+
+from codebase_rag.services.llm import create_repair_code_model
+from codebase_rag.tools.analyze_antipattern_relevance_files import run_with_retry
+
+
 #
 # from codebase_rag.main import find_first_antipattern_json_in_parent_dir
 # from codebase_rag.services.graph_file_classifier.classifier import GraphFileClassifier
@@ -86,21 +91,25 @@ def test_map_antipattern_nodes_to_project(antipattern_nodes_path, project_nodes_
 
 
 if __name__ == "__main__":
-    from openai import OpenAI
 
-    client = OpenAI(
-        base_url='https://xiaoai.plus/v1',
-        # sk-xxx替换为自己的key
-        api_key='sk-9t1798hIfnUm1WyZ799fE44265Dc428696038561D341C516'
-    )
-    completion = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Hello!"}
-        ]
-    )
-    print(completion.choices[0].message)
+    model = create_repair_code_model("hello")
+    result = run_with_retry(model, "hello,请用json格式回复我")
+    print(result)
+    # from openai import OpenAI
+    #
+    # client = OpenAI(
+    #     base_url='https://xiaoai.plus/v1',
+    #     # sk-xxx替换为自己的key
+    #     api_key='sk-9t1798hIfnUm1WyZ799fE44265Dc428696038561D341C516'
+    # )
+    # completion = client.chat.completions.create(
+    #     model="gpt-4o",
+    #     messages=[
+    #         {"role": "system", "content": "You are a helpful assistant."},
+    #         {"role": "user", "content": "Hello!"}
+    #     ]
+    # )
+    # print(completion.choices[0].message)
     # graph_data = "/Users/moncheri/Downloads/main/重构/反模式修复数据集构建/CodeGraphRAG/tmp/awd-final-result.json"
     # antipattern_to_update = "/Users/moncheri/Downloads/main/重构/反模式修复数据集构建/CodeGraphRAG/test-project/AWD/86/before"
     # antipattern_type = "awd"

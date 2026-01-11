@@ -59,6 +59,16 @@ def start_default(
         no_confirm: bool = True,
         result_folder_name: str | None = None,
 ) -> None:
+    # 每次对于消融实验，要修改两部分内容：collect_antipattern_repo_pairs 中的
+    # related_score_programs_root = (
+    #         base_root
+    #         / "extract_antipatterns_and_repair"
+    #         / "antipattern-related-score"
+    #         / "tmp"
+    #         / "merged_match_scores"
+    # )
+    # 以及         best_related_repair_example_path = get_best_related_antipattern_path(related_score_json_path,
+    #                                                                              ablation="best_repaired_description.json")
     pairs = collect_antipattern_repo_pairs("/data/sanglei/反模式修复数据集构建")
     print(f"Total pairs: {len(pairs)}")
     failed_log_path = os.path.join(
@@ -70,6 +80,14 @@ def start_default(
         antipattern_type = p["antipattern_type"].lower()
         project_name = p["project_name"]
         commit_number = p["commit_number"]
+        target_repo_path = p["target_repo_path"]
+        antipattern_relation_path = p["antipattern_relation_path"]
+        related_score_json_path = p["related_score_json_path"]
+        best_related_repair_example_path = ""
+        # best_related_repair_example_path = get_best_related_antipattern_path(related_score_json_path,
+        #                                                                      ablation="repaired_description.json")
+        # best_related_repair_example_path = get_best_related_antipattern_path(related_score_json_path,
+        #                                                                      ablation="best_repaired_description.json")
         id = p["id"]
         result_folder_name = ablation_type
         output = os.path.join(
@@ -84,8 +102,8 @@ def start_default(
         try:
             if antipattern_type == antipattern_type_limit:
                 start(
-                    repo_path=p["target_repo_path"],
-                    antipattern_relation_path=p["antipattern_relation_path"],
+                    repo_path=target_repo_path,
+                    antipattern_relation_path=antipattern_relation_path,
                     update_project_graph=update_project_graph,
                     update_antipattern_graph=update_antipattern_graph,
                     antipattern_type=antipattern_type,
@@ -98,6 +116,7 @@ def start_default(
                     embedding_model=embedding_model,
                     no_confirm=no_confirm,
                     result_folder_name=result_folder_name,
+                    best_related_repair_example_path=best_related_repair_example_path,
                 )
         except Exception as e:
             logger.exception(
@@ -126,16 +145,18 @@ def collect_antipattern_repo_pairs(
 ) -> List[Dict[str, str]]:
     """
     Traverse antipattern dataset structure and collect mappings between
-    antipattern_relation_path (before) and target_repo_path.
+    antipattern_relation_path (before), target_repo_path,
+    and related score aggregated_results.json.
 
     Returns a list of dicts:
     {
         "antipattern_type": "AWD",
         "project_name": "alluxio",
-        "commit_number": 1100,
+        "commit_number": "commit_1100",
         "id": 18,
         "antipattern_relation_path": ".../before",
-        "target_repo_path": ".../dataset_programs/apache/commit_xxx_snapshot/project"
+        "target_repo_path": ".../dataset_programs/apache/commit_xxx_snapshot/project",
+        "related_score_json_path": ".../aggregated_results.json" | None
     }
     """
 
@@ -144,9 +165,26 @@ def collect_antipattern_repo_pairs(
     antipattern_root = (
             base_root / "extract_antipatterns_and_repair" / "final"
     )
+
     dataset_programs_root = (
             base_root / "dataset_programs" / "apache"
     )
+
+    related_score_programs_root = (
+            base_root
+            / "extract_antipatterns_and_repair"
+            / "antipattern-related-score"
+            / "tmp_ablation"
+            / "merged_match_scores"
+    )
+
+    # related_score_programs_root = (
+    #         base_root
+    #         / "extract_antipatterns_and_repair"
+    #         / "antipattern-related-score"
+    #         / "tmp"
+    #         / "merged_match_scores"
+    # )
 
     results: List[Dict[str, str]] = []
 
@@ -197,6 +235,22 @@ def collect_antipattern_repo_pairs(
                             / project_name
                     )
 
+                    # -------- related score path --------
+                    related_score_json_path = (
+                            related_score_programs_root
+                            / antipattern_type
+                            / project_name
+                            / commit_number
+                            / str(id_number)
+                            / "aggregated_results.json"
+                    )
+
+                    if not related_score_json_path.exists():
+                        related_score_json_path = None
+                        print("related_score_json_path not exists")
+                    else:
+                        related_score_json_path = str(related_score_json_path)
+
                     results.append(
                         {
                             "antipattern_type": antipattern_type,
@@ -205,6 +259,7 @@ def collect_antipattern_repo_pairs(
                             "id": id_number,
                             "antipattern_relation_path": str(before_dir),
                             "target_repo_path": str(target_repo_path),
+                            "related_score_json_path": related_score_json_path,
                         }
                     )
 
@@ -243,10 +298,57 @@ def record_failed_case(
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def get_best_related_antipattern_path(
+        related_score_json_path: str | Path,
+        ablation: str = "repaired_description.json",
+        final_root: str | Path = "/data/sanglei/反模式修复数据集构建/extract_antipatterns_and_repair/final",
+):
+    """
+    Returns:
+        Path to ablation file if exists, otherwise None
+    """
+
+    related_score_json_path = Path(related_score_json_path)
+    final_root = Path(final_root)
+
+    if not related_score_json_path.exists():
+        return None
+
+    with open(related_score_json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not data:
+        return None
+
+    best_item = max(
+        data.values(),
+        key=lambda x: x.get("score", float("-inf"))
+    )
+
+    best_path = best_item.get("path")
+    if not best_path:
+        return None
+
+    parts = best_path.split("/")
+    if len(parts) < 2:
+        return None
+
+    parts_with_apache = [parts[0], "apache"] + parts[1:]
+
+    final_path = final_root.joinpath(*parts_with_apache, ablation)
+
+    if not final_path.is_file():
+        print(f"ablation file not exists: {final_path}")
+        return None
+
+    return final_path
+
+
 if __name__ == "__main__":
     # pairs = collect_antipattern_repo_pairs("/data/sanglei/反模式修复数据集构建")
     # for item in pairs[:3]:
     #     print(item)
-    run_batch(antipattern_type_limit="ch", ablation_type="ap_none")
-    # run_batch(antipattern_type_limit="awd")
+    # ablation_type = ["ap_none", "ap_chunk", "ap_cg_full"]
+    run_batch(antipattern_type_limit="mh", ablation_type="ap_none")
+    # run_batch(antipattern_type_limit="awd", ablation_type="ap_cg_full")
     # run_batch(antipattern_type_limit="mh")

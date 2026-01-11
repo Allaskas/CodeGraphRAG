@@ -15,12 +15,12 @@ graphTarget:
     - Override
   edgeLevel:
     exclude:
-      - Inherit
       - Import
+      - Inherit
       - Implement
   vertexLevel:
-    package
+    class
 detectTarget:
-  cycle:
-    minCycleCount: 2
-
+  findVertex:
+    twoForOne:
+      constraint: Inherit

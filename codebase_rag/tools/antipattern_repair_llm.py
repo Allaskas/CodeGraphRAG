@@ -26,18 +26,22 @@ def generate_direct_file_repair_suggestions(antipattern_json_path, classify_resu
     """
 
     llm_json = ""
-    if repaired_description_json_path:
+    repaired_description_json_path = Path(repaired_description_json_path)
+    # 判断是否为 json 文件（按后缀名）
+    if repaired_description_json_path.suffix.lower() == ".json" and repaired_description_json_path.exists():
+        print(f"best_related_repair_example_path: {repaired_description_json_path}")
         fix_system_prommpt = build_fix_system_prompt(antipattern_type, repaired_description_json_path)
     else:
+        print(f"best_related_repair_example_path not exist")
         fix_system_prommpt = build_fix_system_prompt_1(antipattern_type)
     repair_code_model = create_repair_code_model(fix_system_prommpt)
-    print(f"fix_system_prommpt: {fix_system_prommpt}")
+    # print(f"fix_system_prommpt: {fix_system_prommpt}")
     with open(antipattern_json_path, "r", encoding="utf-8") as f:
         antipattern_json = json.load(f)
 
     prompt = build_generate_file_repair_suggestions_prompt(classify_result, antipattern_json, antipattern_type)
-    print(f"original_prompt: {prompt}")
-    print("original_prompt Out over")
+    # print(f"original_prompt: {prompt}")
+    # print("original_prompt Out over")
 
     direct_related = classify_result.get("direct_related", [])
 
@@ -171,103 +175,109 @@ def generate_direct_file_code_repair(
     while attempt < max_attempts:
         attempt += 1
         logger.info(f"===== Attempt {attempt}/{max_attempts} =====")
+        try:
+            # 1️⃣ 非第一次先删除旧结果
+            if attempt > 1:
+                remove_dir_if_exists(after_code_path)
 
-        # 1️⃣ 非第一次先删除旧结果
-        if attempt > 1:
-            remove_dir_if_exists(after_code_path)
+            # ================= 生成修复代码 =================
+            client = create_repair_code_model(DIRECT_FILE_CODE_REPAIR_SYSTEM_PROMPT)
+            summary = direct_suggestions.get("summary")
+            files = direct_suggestions.get("files", [])
 
-        # ================= 生成修复代码 =================
-        client = create_repair_code_model(DIRECT_FILE_CODE_REPAIR_SYSTEM_PROMPT)
-        summary = direct_suggestions.get("summary")
-        files = direct_suggestions.get("files", [])
+            for file_info in tqdm(files, desc="Generating direct file code repair"):
+                user_input = build_generate_file_repair_code_prompt(target_repo_path, summary, file_info)
+                # 加上无关文件的
+                user_input = build_generate_file_repair_code_prompt_1(target_repo_path, summary, file_info, other_content)
 
-        for file_info in tqdm(files, desc="Generating direct file code repair"):
-            user_input = build_generate_file_repair_code_prompt(target_repo_path, summary, file_info)
-            # 加上无关文件的
-            user_input = build_generate_file_repair_code_prompt_1(target_repo_path, summary, file_info, other_content)
+                try:
+                    new_code = run_with_retry_code(client, user_input)
+                    new_code = strip_markdown_code_block(new_code)
+                except Exception as e:
+                    logger.exception("LLM 调用失败")
+                    new_code = "llm return wrong"
+
+                file_path = file_info.get("file_path")
+                if not file_path:
+                    logger.warning("file_path is empty, skip")
+                    continue
+
+                tmp_file_path = os.path.join(after_code_path, file_path)
+                os.makedirs(os.path.dirname(tmp_file_path), exist_ok=True)
+
+                with open(tmp_file_path, "w", encoding="utf-8") as f:
+                    f.write(new_code)
+
+            # ================= ENRE =================
+            enre_path = Path("codebase_rag/enre/lib/enre_java.jar").resolve()
+            enre_command = (
+                f"java -Xmx20G -jar {enre_path} "
+                f"java {after_code_path} {after_code_folder_name}"
+            )
+
+            cwd = os.getcwd()
+            enre_out_path = os.path.join(cwd, f"{after_code_folder_name}-enre-out")
 
             try:
-                new_code = run_with_retry_code(client, user_input)
-                new_code = strip_markdown_code_block(new_code)
-            except Exception as e:
-                logger.exception("LLM 调用失败")
-                new_code = "llm return wrong"
+                subprocess.run(enre_command, shell=True, check=True)
+                move_folder(enre_out_path, after_code_path)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"ENRE 执行失败: {e}")
+                break
 
-            file_path = file_info.get("file_path")
-            if not file_path:
-                logger.warning("file_path is empty, skip")
-                continue
+            # ================= GAP =================
+            gap_path = Path("codebase_rag/enre/lib/GAP-1.0.jar").resolve()
 
-            tmp_file_path = os.path.join(after_code_path, file_path)
-            os.makedirs(os.path.dirname(tmp_file_path), exist_ok=True)
+            enre_json_files = list(Path(after_code_path).rglob("*-out.json"))
+            print(f"after_code_path: {after_code_path}")
+            print(f"数目：{len(enre_json_files)}")
+            print(f"enre_json_files：{enre_json_files}")
+            if len(enre_json_files) != 1:
+                raise RuntimeError(f"ENRE JSON 数量异常: {enre_json_files}")
 
-            with open(tmp_file_path, "w", encoding="utf-8") as f:
-                f.write(new_code)
+            enre_json_path = enre_json_files[0].resolve()
 
-        # ================= ENRE =================
-        enre_path = Path("codebase_rag/enre/lib/enre_java.jar").resolve()
-        enre_command = (
-            f"java -Xmx20G -jar {enre_path} "
-            f"java {after_code_path} {after_code_folder_name}"
-        )
+            gap_command = (
+                f"java -jar {gap_path} detect "
+                f"-n {after_code_folder_name} "
+                f"-d {enre_json_path}"
+            )
 
-        cwd = os.getcwd()
-        enre_out_path = os.path.join(cwd, f"{after_code_folder_name}-enre-out")
+            gap_out_path = os.path.join(cwd, f"{after_code_folder_name}-gap-out")
 
-        try:
-            subprocess.run(enre_command, shell=True, check=True)
-            move_folder(enre_out_path, after_code_path)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"ENRE 执行失败: {e}")
-            break
+            try:
+                subprocess.run(gap_command, shell=True, check=True)
+                move_folder(gap_out_path, after_code_path)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"GAP 执行失败: {e}")
+                break
 
-        # ================= GAP =================
-        gap_path = Path("codebase_rag/enre/lib/GAP-1.0.jar").resolve()
+            # ================= 读取 GAP 结果 =================
+            gap_json_files = list(
+                Path(after_code_path).rglob(f"*{antipattern_type}.json")
+            )
+            if len(gap_json_files) != 1:
+                raise RuntimeError(f"GAP JSON 数量异常: {gap_json_files}")
 
-        enre_json_files = list(Path(after_code_path).rglob("*-out.json"))
-        print(f"after_code_path: {after_code_path}")
-        print(f"数目：{len(enre_json_files)}")
-        print(f"enre_json_files：{enre_json_files}")
-        if len(enre_json_files) != 1:
-            raise RuntimeError(f"ENRE JSON 数量异常: {enre_json_files}")
+            gap_json_path = gap_json_files[0].resolve()
+            last_gap_json_path = gap_json_path
 
-        enre_json_path = enre_json_files[0].resolve()
+            last_gap_count = read_gap_count(gap_json_path)
+            logger.info(f"GAP count = {last_gap_count}")
 
-        gap_command = (
-            f"java -jar {gap_path} detect "
-            f"-n {after_code_folder_name} "
-            f"-d {enre_json_path}"
-        )
-
-        gap_out_path = os.path.join(cwd, f"{after_code_folder_name}-gap-out")
-
-        try:
-            subprocess.run(gap_command, shell=True, check=True)
-            move_folder(gap_out_path, after_code_path)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"GAP 执行失败: {e}")
-            break
-
-        # ================= 读取 GAP 结果 =================
-        gap_json_files = list(
-            Path(after_code_path).rglob(f"*{antipattern_type}.json")
-        )
-        if len(gap_json_files) != 1:
-            raise RuntimeError(f"GAP JSON 数量异常: {gap_json_files}")
-
-        gap_json_path = gap_json_files[0].resolve()
-        last_gap_json_path = gap_json_path
-
-        last_gap_count = read_gap_count(gap_json_path)
-        logger.info(f"GAP count = {last_gap_count}")
-
-        # ================= 判断是否成功 =================
-        if last_gap_count == 0:
-            success = True
-            logger.info("✅ GAP 检测通过，修复成功")
-            break
-        else:
-            logger.warning("❌ GAP 仍检测到反模式，将重试")
+            # ================= 判断是否成功 =================
+            if last_gap_count == 0:
+                success = True
+                logger.info("✅ GAP 检测通过，修复成功")
+                break
+            else:
+                logger.warning("❌ GAP 仍检测到反模式，将重试")
+        except Exception as e:
+            # 任何异常都算一次失败，但继续 while
+            logger.exception(
+                f"Attempt {attempt} 发生异常，将进入下一次重试"
+            )
+            continue
 
     # ================= 最终记录 =================
     result = {
